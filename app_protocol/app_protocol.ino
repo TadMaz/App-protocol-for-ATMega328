@@ -13,31 +13,30 @@
 #include <SPI.h>
 #include <RH_RF95.h>
 
+/*------------------------------SYSTEM CONSTANTS-----------------------------*/
 #define RED_LED 7
 #define GREEN_LED 8
 #define BLINK_DELAY 100
 #define RX_WAIT_TIME 10000
 
-// Initial System Timing
+/*---------------------Initial System Timing----------------------------------*/
+
 unsigned long startTime = millis();
 unsigned long previousBroadcastTime  = startTime;
 unsigned long previousHeartbeatTime  = startTime;
 unsigned long previousVibrationSignatureTime = startTime;
 unsigned long lastBatteryStatusCheck = startTime;
 unsigned long currentTime;
-/*--------------------- 
 
 /*--------------------- WATCHDOG TIMER SETTINGS -------------------------------*/
 // This variable is made volatile because it is changed inside
 // an interrupt function
 volatile int f_wdt=1;
 
-/*-----------------------------------------------------------------------------*/
-
-// Singleton instance of the radio driver
+/*--------------------INITIALISE THE RFM95 and the routing table---------------*/
 RH_RF95 rf95(10, 2);
 AppRouter router;
-
+/*-----------------------------------------------------------------------------*/
 void setup()
 {
   //Setup Green and Red LED as output
@@ -64,40 +63,22 @@ void setup()
   Serial.println("Intialisation Complete.");
 
 }
-uint8_t no_of_cycles = 0;
 
 void loop()
 { 
     //Initialise the buffer
     uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
-    if (no_of_cycles == 10){
-      Serial.println("Exp complete");
-      while(1);
-    }
     
-    currentTime = millis();
-    Serial.println("Starting protocol cycle");
- 
+    Serial.println("Application protocol starting. . .");
     runProtocol((uint8_t*)buf);
-    
-    
-    no_of_cycles++;
 }
 
 void runProtocol(uint8_t* buf){
 
   /*-----------------------------INITIALISE BUFFER---------------------------------------------------*/
-  uint8_t buf[RH_RF95_MAX_MESSAGE_LEN];
+ 
   uint8_t len = sizeof(buf);
 
-  float timestamp[MAX_NO_OF_READINGS];
-  float windspeed[MAX_NO_OF_READINGS]; 
-  int16_t accX[MAX_NO_OF_READINGS] ;
-  int16_t accY [MAX_NO_OF_READINGS]; 
-  int16_t accZ[MAX_NO_OF_READINGS]; 
-  float pitch [MAX_NO_OF_READINGS];
-  float roll [MAX_NO_OF_READINGS];
-    
 /*-----------------------------SEARCH FOR POSSIBLE ROUTES-------------------------------------------*/
 
   
@@ -133,56 +114,27 @@ void runProtocol(uint8_t* buf){
     {
      
       // 1. Send Broadcast if Broadcast Message is received
-      if (Util::isBroadcastMessage(buf)) {
+      if (Util::isBroadcastMessage(buf))
+      {
 
+        // extract the contents of the broadcast Message and add them to the router
         uint16_t id = Rx::extractBroadcastMessage(buf, rf95.lastRssi(), &router);
 
-        Serial.print("Route to Node ");
-        Serial.print(id, DEC);
-        Serial.println(" added.");
-        Serial.print("The best destination is :"); 
-        Serial.println(router.getBestDestination,DEC);
-
-      }
-      //Is packet addressed to this node and is one of the gateway messages?
-      else if (Util::isVibrationSignature(buf)){
-        for (int i =0; i< RH_RF95_MAX_MESSAGE_LEN; i++){
-//          Serial.print(buf[i],DEC);
-        }
-//        Serial.println("Vibration Signature received");
-        Rx::readPayloadFromBuffer(timestamp, windspeed, accX, accY,
-                        accZ, pitch, roll, buf, MAX_NO_OF_READINGS);
-                        
-        relayMessage(buf);
-        
-        for(int i = 0 ; i< MAX_NO_OF_READINGS; i++){
-//            Serial.print(timestamp[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(windspeed[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(accX[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(accY[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(accZ[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(pitch[i], DEC);
-//            Serial.print(" ");
-//            Serial.print(roll[i], DEC);
-//            Serial.println(" ");
-        }
+      // Check if the message is addressed to this node, 
+      //and is a Gateway Message (Vibration Signature or Heartbeat Message)
+      
+      }else if (Util::matchIDs(buf) && (
+                Util::isBroadcastMessage(buf) || Util::isHeartbeat(buf)))
+              
+      {   
+          // Relay -> Change the destination on the packet to the best node and send this packet 
+          // The source address is maintained             
+          relayMessage(buf);
       }
 
-    }
-    else
-    {
-      //      Serial.println("recv failed");
     }
   }
-  else
-  {
-    //    Serial.println("No reply, is rf95_server running?");
-  }  
+ 
 }
 //--------------------------------- WATCH DOG TIMER ----------------------------------
 // Setup the Watch Dog Timer (WDT)
@@ -265,6 +217,10 @@ ISR(WDT_vect) {
 
 //--------------------------------- APPLICATION METHODS ------------------------------
 
+
+/**
+  This method resets the router and sends a Broadcast Message 3 time 
+*/
 void sendBroadcast(){
 
   // Reset Routing Table
@@ -277,6 +233,9 @@ void sendBroadcast(){
  
 }
 
+/**
+ * This is a helper method to sendBroadcast - it sends the broadcast Message
+ */
 void sendBroadcastMessage() {
   uint8_t data[4];
   Tx::constructBroadcastMessage(&data[0]);
@@ -284,10 +243,12 @@ void sendBroadcastMessage() {
   rf95.send(data, sizeof(data));
   rf95.waitPacketSent();
 
-//  Serial.println("Sent : BR");
 
 }
-
+/*
+ * This method sends a message to the gateway
+ * Valid gateway messages are Vibration Signature Messages and Heartbeat Message
+ */
 void sendMessageToGateway(uint8_t messageType){
 
   if (messageType > 4 || messageType < 0){
@@ -299,37 +260,33 @@ void sendMessageToGateway(uint8_t messageType){
 
   if( messageType == VIBRATION_SIGNATURE_MESSAGE ){
       Tx::constructVibrationMessage(data, destID);
-//      Serial.println ("Sending Vibration Signature . . ");
   }
 
   if (messageType == HEARTBEAT_MESSAGE){
       Tx::constructHeartbeatMessage(data, destID);
-//      Serial.println ("Sending Heartbeat . . ");
   }
 
   rf95.setModeTx();
   rf95.send(data, sizeof(data));
   rf95.waitPacketSent();
-//  Serial.println("Message sent");
 }
 
+/* 
+ *This method modifies the destination address with the best route and sends the packet 
+ */
 void relayMessage(uint8_t* buf) {
-  // Change the destination of this packet to the new destination and relay the packet
-
-  uint16_t destID = router.getBestDestination();
-
-  if (!destID) {
-//    Serial.println("No routes found.");
-    return;
-  }
-
-  Util::writeNodeIdToBuffer(destID, buf, DESTINATION_ID_START);
-  rf95.setModeTx();
-  rf95.send(buf, sizeof(buf));
-  rf95.waitPacketSent();
-//  Serial.print("Message Relayed to Node ");
-//  Serial.println(destID, DEC);
-
+    // Change the destination of this packet to the new destination and relay the packet
+  
+    uint16_t destID = router.getBestDestination();
+  
+    if (!destID) {
+      return;
+    }
+  
+    Util::writeNodeIdToBuffer(destID, buf, DESTINATION_ID_START);
+    rf95.setModeTx();
+    rf95.send(buf, sizeof(buf));
+    rf95.waitPacketSent();
 }
 
 
@@ -344,6 +301,9 @@ void blink(int LED, int n_times) {
   }
 }
 
+/*
+ * This method may be used to view the entries on the routing table.
+ */
 void printRoutingTable(AppRouter* router) {
 
   Serial.println("Destination ID | RSSI | Distance To Gateway");
